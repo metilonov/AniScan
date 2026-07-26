@@ -15,78 +15,118 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.config import Config
 from app.db import Database
-from app.models import AnimeAnalysis, QwenKeyRecord, VerificationResult
+from app.models import AnimeAnalysis, ContentClassification, QwenKeyRecord, VerificationResult
 
 
 logger = logging.getLogger(__name__)
 
+CONTENT_CLASSIFY_SYSTEM_PROMPT = (
+    "Ты строгий классификатор изображений для сервиса поиска аниме. "
+    "Не называй произведение и не угадывай персонажа. Верни только JSON."
+)
+
+CONTENT_CLASSIFY_PROMPT = """
+Определи, относится ли изображение именно к аниме.
+
+Ставь content_class="anime" только если это:
+- кадр из японского аниме-сериала, аниме-фильма, OVA или ONA;
+- официальный арт или фан-арт узнаваемого персонажа из произведения, у которого есть аниме-адаптация.
+
+Всегда ставь content_class="not_anime" для:
+- скриншотов и персонажей видеоигр, даже если стиль похож на аниме;
+- фильмов, сериалов, фотографий и другого live-action;
+- манги, манхвы, вебтуна или комикса, если это не кадр из аниме-адаптации;
+- западных мультфильмов, 3D-анимации, мемов, интерфейсов и обычных изображений;
+- сомнительных случаев, где принадлежность к аниме нельзя подтвердить визуально.
+
+Верни ТОЛЬКО JSON:
+{
+  "content_class": "anime",
+  "confidence": 95,
+  "reason": "краткая причина, максимум 12 слов"
+}
+
+content_class: только anime или not_anime.
+confidence: целое число 0–100.
+""".strip()
+
+CONTENT_CLASSIFY_RECHECK_PROMPT = """
+Проведи повторную независимую строгую классификацию изображения.
+Не доверяй предыдущему решению.
+
+Anime — только японское аниме или арт подтверждённого персонажа из аниме-франшизы.
+Игры, live-action фильмы и сериалы, манга, манхва, вебтуны, комиксы,
+западная и 3D-анимация относятся к not_anime, даже при аниме-стилистике.
+При сомнении выбери not_anime.
+
+Верни ТОЛЬКО JSON:
+{
+  "content_class": "anime",
+  "confidence": 95,
+  "reason": "краткая причина, максимум 12 слов"
+}
+""".strip()
+
 IDENTIFY_SYSTEM_PROMPT = (
     "Ты точный эксперт по распознаванию аниме по изображениям. "
-    "Не выдумывай название или персонажа. Отвечай только коротким JSON."
+    "Не выдумывай название или персонажа. Все русские поля пиши по-русски. "
+    "Отвечай только коротким JSON."
 )
 
 IDENTIFY_PROMPT = """
-Независимо определи аниме и главного видимого персонажа на изображении.
+Определи аниме и главного видимого персонажа на изображении.
 
 Верни ТОЛЬКО JSON:
 {
   "content_class": "anime",
-  "title": "название аниме на русском или английском",
-  "character": "имя персонажа или Не удалось определить",
+  "title": "известное название аниме на русском языке",
+  "original_title": "официальное оригинальное или международное название латиницей",
+  "character": "имя персонажа на русском или Не удалось определить",
   "confidence": 94,
-  "scene_description": "одно короткое предложение, максимум 12 слов"
+  "scene_description": "краткая справка о персонаже или сюжете аниме"
 }
 
 Правила:
-- content_class: anime или not_anime;
+- content_class: только anime или not_anime;
+- title всегда пиши на русском, не оставляй его на английском;
+- original_title укажи латиницей: японское ромадзи либо официальное английское название;
+- если это игра, live-action, манга, манхва, вебтун, комикс или не аниме — content_class=not_anime;
 - confidence: целое число 0–100;
+- scene_description: одно короткое предложение, максимум 18 слов;
+- не описывай позу, одежду и расположение объектов на кадре;
+- лучше кратко объясни, кто персонаж или о чём аниме;
 - не указывай серию, сезон, таймкод, жанры и ссылки;
-- описание — максимум 12 слов;
 - никаких Markdown и пояснений вне JSON.
-""".strip()
-
-NOT_ANIME_RECHECK_PROMPT = """
-Первый анализ решил, что изображение может быть не аниме.
-Проверь ещё раз максимально внимательно и независимо.
-Если это кадр, арт или скриншот из аниме, определи название и персонажа.
-
-Верни ТОЛЬКО JSON:
-{
-  "content_class": "anime",
-  "title": "название аниме",
-  "character": "имя персонажа или Не удалось определить",
-  "confidence": 80,
-  "scene_description": "одно короткое предложение, максимум 12 слов"
-}
-
-content_class: anime или not_anime.
 """.strip()
 
 RETRY_PROMPT_TEMPLATE = """
 Предыдущая гипотеза не прошла независимую проверку Qwen.
 
 Отклонённый вариант:
-Название: {title}
+Русское название: {title}
+Оригинальное название: {original_title}
 Персонаж: {character}
 Причина: {reason}
 
 Не повторяй полностью тот же вариант. Проанализируй исходное изображение заново.
-Предложи другой наиболее вероятный результат либо исправь персонажа, если название верное.
+Если это не аниме, обязательно верни content_class=not_anime.
+Иначе предложи другой наиболее вероятный результат либо исправь персонажа.
 
 Верни ТОЛЬКО JSON:
 {{
   "content_class": "anime",
-  "title": "наиболее вероятное название аниме",
-  "character": "имя персонажа или Не удалось определить",
+  "title": "название аниме на русском языке",
+  "original_title": "оригинальное или международное название латиницей",
+  "character": "имя персонажа на русском или Не удалось определить",
   "confidence": 85,
-  "scene_description": "одно короткое предложение, максимум 12 слов"
+  "scene_description": "краткая справка о персонаже или сюжете, максимум 18 слов"
 }}
 """.strip()
 
 VERIFY_SYSTEM_PROMPT = (
     "Ты независимый строгий проверяющий распознавания аниме. "
-    "Сначала сам определи изображение, не доверяя предложенной гипотезе, "
-    "и только затем сравни результаты. Верни только JSON."
+    "Сначала классифицируй тип изображения и сам определи произведение, "
+    "не доверяя предложенной гипотезе. Верни только JSON."
 )
 
 VERIFY_PROMPT_TEMPLATE = """
@@ -94,24 +134,31 @@ VERIFY_PROMPT_TEMPLATE = """
 Не считай гипотезу правильной только потому, что она указана в тексте.
 
 Проверяемая гипотеза:
-Название аниме: {title}
+Русское название аниме: {title}
+Оригинальное название: {original_title}
 Персонаж: {character}
 
-Сравни видимый стиль, дизайн персонажа, лицо, волосы, одежду, окружение и сцену.
+Сначала проверь, что изображение действительно относится к аниме.
+Игры, live-action, манга, манхва, вебтуны, комиксы, западная и 3D-анимация — not_anime.
+Затем сравни стиль, дизайн персонажа, лицо, волосы, одежду, окружение и сцену.
 
 Верни ТОЛЬКО JSON:
 {{
+  "content_class": "anime",
   "verified": true,
   "anime_match": true,
   "character_match": true,
   "scene_match": true,
   "score": 92,
   "reason": "краткая причина, максимум 12 слов",
-  "independent_title": "твоё независимое название или Не удалось определить",
+  "independent_title": "твоё независимое русское название или Не удалось определить",
+  "independent_original_title": "оригинальное название латиницей или Не удалось определить",
   "independent_character": "твой независимый персонаж или Не удалось определить"
 }}
 
 Правила:
+- content_class: только anime или not_anime;
+- если content_class=not_anime, verified=false и anime_match=false;
 - score: число от 0 до 100;
 - verified=true только при достаточных видимых основаниях;
 - если аниме совпало, но персонаж не подтверждён, character_match=false;
@@ -484,6 +531,20 @@ class AnimeAI:
         score = max(0.0, min(1.0, score))
         return sexual or score >= self.config.sexual_score_threshold, score
 
+    @staticmethod
+    def _normalize_content_class(value: Any) -> str:
+        return "anime" if str(value).strip().lower() == "anime" else "not_anime"
+
+    async def _classify(self, image_bytes: bytes, prompt: str) -> ContentClassification:
+        data = await self._request_json(
+            system_prompt=CONTENT_CLASSIFY_SYSTEM_PROMPT,
+            prompt=prompt,
+            images=[image_bytes],
+            max_tokens=min(self.config.identify_max_tokens, 110),
+        )
+        data["content_class"] = self._normalize_content_class(data.get("content_class"))
+        return ContentClassification.model_validate(data)
+
     async def _identify(self, image_bytes: bytes, prompt: str) -> AnimeAnalysis:
         data = await self._request_json(
             system_prompt=IDENTIFY_SYSTEM_PROMPT,
@@ -491,11 +552,23 @@ class AnimeAI:
             images=[image_bytes],
             max_tokens=self.config.identify_max_tokens,
         )
+        data["content_class"] = self._normalize_content_class(data.get("content_class"))
+        if not data.get("title"):
+            data["title"] = data.get("title_ru") or data.get("russian_title") or "Не удалось определить"
+        if not data.get("original_title"):
+            data["original_title"] = (
+                data.get("original_name")
+                or data.get("english_title")
+                or data.get("romaji_title")
+                or data.get("title")
+                or "Не удалось определить"
+            )
         return AnimeAnalysis.model_validate(data)
 
     async def _verify(self, image_bytes: bytes, candidate: AnimeAnalysis) -> VerificationResult:
         prompt = VERIFY_PROMPT_TEMPLATE.format(
             title=candidate.title,
+            original_title=candidate.original_title,
             character=candidate.character,
         )
         data = await self._request_json(
@@ -504,12 +577,14 @@ class AnimeAI:
             images=[image_bytes],
             max_tokens=self.config.verify_max_tokens,
         )
+        data["content_class"] = self._normalize_content_class(data.get("content_class"))
         return VerificationResult.model_validate(data)
 
     def _accepted(self, candidate: AnimeAnalysis, verification: VerificationResult) -> bool:
         character_known = self._known_value(candidate.character)
         return (
-            verification.verified
+            verification.content_class == "anime"
+            and verification.verified
             and verification.anime_match
             and verification.score >= self.config.verify_min_score
             and (
@@ -560,6 +635,11 @@ class AnimeAI:
             round(min(float(candidate.confidence), float(verification.score)))
         )
 
+        if not cls._known_value(candidate.original_title) and cls._known_value(
+            verification.independent_original_title
+        ):
+            candidate.original_title = verification.independent_original_title
+
         if not verification.character_match:
             if cls._known_value(verification.independent_character):
                 candidate.character = verification.independent_character
@@ -572,32 +652,37 @@ class AnimeAI:
     async def analyze_verified(self, image_bytes: bytes, mime: str) -> AnimeAnalysis:
         del mime
 
-        # 1. Первичное независимое распознавание.
+        # 1. Отдельно и строго классифицируем тип изображения до распознавания.
+        classification = await self._classify(image_bytes, CONTENT_CLASSIFY_PROMPT)
+        if classification.content_class == "not_anime":
+            rechecked = await self._classify(image_bytes, CONTENT_CLASSIFY_RECHECK_PROMPT)
+            if rechecked.content_class == "not_anime":
+                return AnimeAnalysis(content_class="not_anime")
+
+        # 2. Первичное распознавание аниме.
         first = await self._identify(image_bytes, IDENTIFY_PROMPT)
         if first.content_class == "not_anime":
-            # 2. Отдельная повторная проверка решения not_anime.
-            rechecked = await self._identify(image_bytes, NOT_ANIME_RECHECK_PROMPT)
-            if rechecked.content_class == "not_anime":
-                return first
-            first = rechecked
-
+            return AnimeAnalysis(content_class="not_anime")
         if not self._title_known(first.title):
             raise UnverifiedAnimeError("Первый анализ не определил название")
 
-        # 3. Свежий запрос Qwen независимо проверяет первую гипотезу.
+        # 3. Свежий запрос Qwen независимо проверяет и тип изображения, и гипотезу.
         first_check = await self._verify(image_bytes, first)
+        if first_check.content_class == "not_anime":
+            return AnimeAnalysis(content_class="not_anime")
         if self._accepted(first, first_check):
             return self._apply_verification(first, first_check)
 
-        # 4. Qwen получает отклонённый вариант и обязан сделать новый анализ.
+        # 4. После неподтверждённой гипотезы Qwen делает новый анализ.
         retry_prompt = RETRY_PROMPT_TEMPLATE.format(
             title=first.title,
+            original_title=first.original_title,
             character=first.character,
             reason=first_check.reason or "результат не подтверждён",
         )
         second = await self._identify(image_bytes, retry_prompt)
         if second.content_class == "not_anime":
-            raise UnverifiedAnimeError("Повторный анализ не подтвердил аниме")
+            return AnimeAnalysis(content_class="not_anime")
         if not self._title_known(second.title):
             raise UnverifiedAnimeError("Повторный анализ не определил название")
         if self._same_candidate(first, second):
@@ -605,7 +690,10 @@ class AnimeAI:
 
         # 5. Ещё один свежий запрос независимо проверяет вторую гипотезу.
         second_check = await self._verify(image_bytes, second)
+        if second_check.content_class == "not_anime":
+            return AnimeAnalysis(content_class="not_anime")
         if self._accepted(second, second_check):
             return self._apply_verification(second, second_check)
 
         raise UnverifiedAnimeError("Две независимые проверки Qwen не подтвердили результат")
+

@@ -122,7 +122,7 @@ async def _photo_search_impl(
 
     remaining: int | None = None
     charged = False
-    processing = await message.answer("⏳ Ищу аниме и выполняю двойную проверку Qwen…")
+    processing = await message.answer("Поиск аниме..")
 
     try:
         sexual, score = await anime_ai.is_sexual(image_bytes, mime)
@@ -186,7 +186,8 @@ async def _photo_search_impl(
         if result.content_class == "not_anime":
             if is_admin:
                 await processing.edit_text(
-                    "⚠️ AI не распознал изображение как аниме. Для администратора предупреждение не начислено."
+                    "⚠️ <b>AniScan работает исключительно с аниме.</b>\n"
+                    "Отправьте кадр или изображение из аниме."
                 )
                 return
 
@@ -197,13 +198,15 @@ async def _photo_search_impl(
             await db.log_search(user_id, mode, "not_anime", "not_anime", None)
             if warning.blocked:
                 await processing.edit_text(
-                    "⛔ Изображение не распознано как аниме. Запрос списан.\n\n"
-                    "Получено третье предупреждение — доступ заблокирован навсегда."
+                    "⛔ <b>AniScan работает исключительно с аниме.</b>\n"
+                    "Игры, фильмы, сериалы, манга, манхва и другие изображения не поддерживаются.\n\n"
+                    "Запрос списан. Получено третье предупреждение — доступ заблокирован навсегда."
                 )
             else:
                 await processing.edit_text(
-                    "⚠️ <b>Изображение не распознано как аниме.</b>\n"
-                    "Запрос списан согласно правилам.\n\n"
+                    "⚠️ <b>AniScan работает исключительно с аниме.</b>\n"
+                    "Игры, фильмы, сериалы, манга, манхва и другие изображения не поддерживаются.\n\n"
+                    "Запрос списан согласно правилам.\n"
                     f"Предупреждений: <b>{warning.warnings}/3</b>.\n"
                     f"Осталось запросов: <b>{remaining}</b>"
                 )

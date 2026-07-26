@@ -94,7 +94,9 @@ def format_analysis(result: AnimeAnalysis, mode: SearchMode, remaining: int | No
     )
     text = (
         "🎬 <b>Аниме найдено!</b>\n"
-        f"🏷 <b>Название:</b> {clean_ai_text(result.title, limit=180)}\n"
+        f"<b>Название:</b> {clean_ai_text(result.title, limit=180)}\n"
+        f"<b>Оригинальное название:</b> "
+        f"{clean_ai_text(result.original_title, limit=180)}\n"
         f"👤 <b>Персонаж:</b> {clean_ai_text(result.character, limit=160)}\n"
         f"🎯 <b>Точность:</b> {result.confidence}%\n"
         f"📝 <b>Краткое описание:</b> {description}"

@@ -17,6 +17,7 @@ BroadcastAction = Literal["channel", "search", "payment", "promo", "click"]
 class AnimeAnalysis(BaseModel):
     content_class: ContentClass
     title: str = "Не удалось определить"
+    original_title: str = "Не удалось определить"
     character: str = "Не удалось определить"
     confidence: int = Field(default=0, ge=0, le=100)
     scene_description: str = ""
@@ -33,7 +34,14 @@ class AnimeAnalysis(BaseModel):
     evidence: list[str] = Field(default_factory=list)
 
 
+class ContentClassification(BaseModel):
+    content_class: ContentClass
+    confidence: int = Field(default=0, ge=0, le=100)
+    reason: str = ""
+
+
 class VerificationResult(BaseModel):
+    content_class: ContentClass = "not_anime"
     verified: bool = False
     anime_match: bool = False
     character_match: bool = False
@@ -41,6 +49,7 @@ class VerificationResult(BaseModel):
     score: float = Field(default=0.0, ge=0.0, le=100.0)
     reason: str = ""
     independent_title: str = "Не удалось определить"
+    independent_original_title: str = "Не удалось определить"
     independent_character: str = "Не удалось определить"
 
 
