@@ -1,0 +1,6 @@
+aiogram==3.30.0
+openai==2.46.0
+pydantic>=2.13.4,<3.0.0
+python-dotenv==1.2.2
+aiosqlite==0.22.1
+Pillow==12.3.0

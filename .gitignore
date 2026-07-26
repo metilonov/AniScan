@@ -1,0 +1,14 @@
+!.env.example
+*.db
+*.log
+*.py[cod]
+*.pyc
+*.pyo
+.env
+.env.*
+.idea/
+.venv/
+.vscode/
+__pycache__/
+data/
+venv/
